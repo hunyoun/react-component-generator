@@ -320,7 +320,8 @@
   gap: 8px;
 }
 
-.prompt-examples {
+.prompt-examples,
+.prompt-history {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
@@ -698,7 +699,8 @@
     width: 100%;
   }
 
-  .prompt-examples {
+  .prompt-examples,
+  .prompt-history {
     grid-template-columns: 1fr;
   }
 
