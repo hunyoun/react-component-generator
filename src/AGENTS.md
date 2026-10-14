@@ -13,7 +13,11 @@ Vite 기반 React 프론트엔드. 프롬프트 입력(`PromptInput`) → 생성
 
 - 데이터 fetch·상태는 커스텀 훅(`useComponentGenerator.ts`)에 모으고, 컴포넌트는 props로만 받는다. 새 서버 연동을 추가할 때 컴포넌트에 직접 `fetch`를 넣지 말고 훅을 확장하라.
 - `ComponentCard`는 `previewKey`를 올려 `LivePreview`를 강제로 리마운트시켜 "새로고침"을 구현한다(`src/components/ComponentCard.tsx:17,33,70`). `key` prop 변경 외의 다른 리렌더 트릭을 쓰지 마라.
-- API 키(`App.tsx:14`)는 React state에만 둔다. `localStorage`/`sessionStorage`에 저장하지 마라 — 지금 코드베이스 어디에도 그런 영속화가 없다.
+- 새로고침 후에도 유지해야 하는 상태(API 키, provider, 컴포넌트 목록, 프롬프트 히스토리)는 `useState` 대신 `usePersistedState`(`src/hooks/usePersistedState.ts`)를 쓴다. 저장 키는 `src/utils/storage.ts`의 `STORAGE_KEYS`에 추가하고, `Date`처럼 JSON으로 직렬화되지 않는 필드가 있으면 `reviver` 인자로 복원하라(`useComponentGenerator.ts`의 `reviveComponents` 참고).
+
+## Security Note
+
+- API 키를 `localStorage`에 저장하는 것은 의도된 UX 선택이다(새로고침 후 재입력 방지). 다만 `localStorage`는 같은 오리진의 어떤 스크립트에서도 읽을 수 있어 XSS에 노출되면 키가 함께 유출된다. 서버로 보내는 요청(`/api/generate`) 외의 경로로 `apiKey` 값을 로깅·전송하는 코드를 추가하지 마라.
 
 ## Testing Strategy
 
@@ -22,5 +26,5 @@ Vite 기반 React 프론트엔드. 프롬프트 입력(`PromptInput`) → 생성
 
 ## Local Golden Rules
 
-- `apiKey`는 `App.tsx` 상태로만 유지하고, 필요한 곳(`handleGenerate`를 통한 `generate` 호출)에만 전달한다. 콘솔 로그나 다른 전역 상태로 복제하지 마라.
-- `provider` 변경 시 `apiKey`를 초기화한다(`App.tsx:41-44`, `handleProviderChange`). 프로바이더 전환 로직을 바꿀 때도 이 초기화를 유지하라 — 다른 프로바이더의 키가 잘못 전송되는 것을 막는 장치다.
+- `apiKey`는 `App.tsx`의 `usePersistedState` 상태로만 유지하고, 필요한 곳(`handleGenerate`를 통한 `generate` 호출)에만 전달한다. 콘솔 로그나 다른 전역 상태로 복제하지 마라.
+- `provider` 변경 시 `apiKey`를 초기화한다(`App.tsx`, `handleProviderChange`). 프로바이더 전환 로직을 바꿀 때도 이 초기화를 유지하라 — 다른 프로바이더의 키가 잘못 전송되는 것을 막는 장치다. (단, `apiKey`도 `provider`도 각각 영속화돼 있으므로, 이 초기화가 저장된 값까지 지우는지 — 즉 전환 직후 새로고침해도 빈 키로 남는지 — 동작이 바뀔 때마다 확인하라.)
