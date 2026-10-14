@@ -357,6 +357,12 @@
   color: #1d4ed8;
 }
 
+.prompt-error {
+  color: #991b1b;
+  font-size: 0.85rem;
+  margin-top: 6px;
+}
+
 .error-banner {
   padding: 14px 16px;
   background: #fef2f2;
