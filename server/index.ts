@@ -1,5 +1,15 @@
-import { stripCodeFences, ensureRenderCall } from './generator';
-import { withModelFallback } from './fallback';
+import {
+  stripCodeFences,
+  ensureRenderCall,
+  splitSSEFrames,
+  getSSEDataPayload,
+  extractAnthropicDeltaText,
+  extractGoogleDeltaText,
+  isGoogleMaxTokensFinish,
+  formatSSEEvent,
+  extractAnthropicErrorMessage,
+  extractGoogleErrorMessage,
+} from './generator';
 
 // 우선순위 순서. 앞 모델이 실패하면 다음 모델로 폴백한다.
 const GOOGLE_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash'];
@@ -65,7 +75,50 @@ function resolveApiKey(provider: Provider, clientKey?: string): string | null {
   return clientKey || ENV_KEYS[provider] || null;
 }
 
-async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
+/** SSE 응답 바디를 읽어 프레임마다 data payload를 onPayload로 전달한다. */
+async function forwardSSE(
+  body: ReadableStream<Uint8Array>,
+  onPayload: (payload: string) => void,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const consumeFrames = () => {
+    const { frames, rest } = splitSSEFrames(buffer);
+    buffer = rest;
+    for (const frame of frames) {
+      const payload = getSSEDataPayload(frame);
+      if (payload) onPayload(payload);
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      consumeFrames();
+    }
+
+    // 스트림이 마지막 빈 줄 없이 끝났을 수 있으므로 남은 버퍼를 최종 프레임으로 처리한다.
+    buffer += decoder.decode();
+    consumeFrames();
+    if (buffer) {
+      const payload = getSSEDataPayload(buffer);
+      if (payload) onPayload(payload);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function streamAnthropic(
+  prompt: string,
+  apiKey: string,
+  onDelta: (text: string) => void,
+): Promise<void> {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -78,25 +131,28 @@ async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
       max_tokens: 4096,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: prompt }],
+      stream: true,
     }),
   });
 
-  if (!response.ok) {
+  if (!response.ok || !response.body) {
     throw new Error(`Claude API error: ${response.status}`);
   }
 
-  const data = (await response.json()) as {
-    content: Array<{ type: string; text?: string }>;
-  };
-
-  return data.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
+  await forwardSSE(response.body, (payload) => {
+    const errorMessage = extractAnthropicErrorMessage(payload);
+    if (errorMessage) throw new Error(errorMessage);
+    onDelta(extractAnthropicDeltaText(payload));
+  });
 }
 
-async function callGoogleModel(prompt: string, apiKey: string, model: string): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+async function streamGoogleModel(
+  prompt: string,
+  apiKey: string,
+  model: string,
+  onDelta: (text: string) => void,
+): Promise<void> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -108,31 +164,47 @@ async function callGoogleModel(prompt: string, apiKey: string, model: string): P
     }),
   });
 
-  if (!response.ok) {
+  if (!response.ok || !response.body) {
     throw new Error(`Gemini API error: ${response.status}`);
   }
 
-  const data = (await response.json()) as {
-    candidates: Array<{
-      content: { parts: Array<{ text?: string }> };
-      finishReason?: string;
-    }>;
-  };
-
-  const candidate = data.candidates?.[0];
-  if (candidate?.finishReason === 'MAX_TOKENS') {
-    throw new Error('생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.');
-  }
-
-  return (
-    candidate?.content?.parts
-      ?.map((part) => part.text)
-      ?.join('') ?? ''
-  );
+  await forwardSSE(response.body, (payload) => {
+    const errorMessage = extractGoogleErrorMessage(payload);
+    if (errorMessage) throw new Error(errorMessage);
+    if (isGoogleMaxTokensFinish(payload)) {
+      throw new Error('생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.');
+    }
+    onDelta(extractGoogleDeltaText(payload));
+  });
 }
 
-async function callGoogle(prompt: string, apiKey: string): Promise<string> {
-  return withModelFallback(GOOGLE_MODELS, (model) => callGoogleModel(prompt, apiKey, model));
+/**
+ * GOOGLE_MODELS를 순서대로 시도한다. 단, 한 모델이 델타를 하나라도 클라이언트로
+ * 내보낸 뒤 실패하면 다음 모델로 재시도하지 않고 그대로 에러를 던진다 — 재시도하면
+ * 이전 모델의 출력 뒤에 새 모델의 출력이 이어붙어 코드가 깨지기 때문이다.
+ */
+async function streamGoogle(
+  prompt: string,
+  apiKey: string,
+  onDelta: (text: string) => void,
+): Promise<void> {
+  let hasEmitted = false;
+  let lastError: unknown;
+
+  for (const model of GOOGLE_MODELS) {
+    try {
+      await streamGoogleModel(prompt, apiKey, model, (text) => {
+        if (text) hasEmitted = true;
+        onDelta(text);
+      });
+      return;
+    } catch (err) {
+      lastError = err;
+      if (hasEmitted) throw err;
+    }
+  }
+
+  throw lastError;
 }
 
 const server = Bun.serve({
@@ -180,30 +252,51 @@ const server = Bun.serve({
           );
         }
 
-        const text =
-          provider === 'google'
-            ? await callGoogle(prompt, resolvedKey)
-            : await callAnthropic(prompt, resolvedKey);
+        const stream = new ReadableStream({
+          async start(controller) {
+            const encoder = new TextEncoder();
+            let fullText = '';
+            const onDelta = (text: string) => {
+              if (!text) return;
+              fullText += text;
+              controller.enqueue(encoder.encode(formatSSEEvent({ type: 'delta', text })));
+            };
 
-        const code = ensureRenderCall(stripCodeFences(text));
+            try {
+              if (provider === 'google') {
+                await streamGoogle(prompt, resolvedKey, onDelta);
+              } else {
+                await streamAnthropic(prompt, resolvedKey, onDelta);
+              }
 
-        return Response.json({ code }, { headers: CORS_HEADERS });
+              const code = ensureRenderCall(stripCodeFences(fullText));
+              controller.enqueue(encoder.encode(formatSSEEvent({ type: 'done', code })));
+            } catch (err) {
+              const message = err instanceof Error ? err.message : 'Unknown error';
+              const friendlyMessage = message.includes('503')
+                ? 'API 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.'
+                : message.includes('429')
+                  ? '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.'
+                  : message;
+
+              controller.enqueue(
+                encoder.encode(formatSSEEvent({ type: 'error', message: friendlyMessage }))
+              );
+            } finally {
+              controller.close();
+            }
+          },
+        });
+
+        return new Response(stream, {
+          headers: {
+            ...CORS_HEADERS,
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+          },
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
-
-        if (message.includes('503')) {
-          return Response.json(
-            { error: 'API 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.' },
-            { status: 503, headers: CORS_HEADERS }
-          );
-        }
-
-        if (message.includes('429')) {
-          return Response.json(
-            { error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
-            { status: 429, headers: CORS_HEADERS }
-          );
-        }
 
         return Response.json(
           { error: message },
