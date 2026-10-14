@@ -162,13 +162,6 @@ function App() {
           </div>
         )}
 
-        {isLoading && (
-          <div className="loading-card">
-            <div className="loading-pulse" />
-            <p>컴포넌트를 생성하고 있습니다...</p>
-          </div>
-        )}
-
         <div className="results-grid">
           {components.map((component) => (
             <ComponentCard

@@ -22,3 +22,95 @@ export function ensureRenderCall(code: string): string {
   }
   return code;
 }
+
+/** 누적 버퍼를 완결된 SSE 프레임들과 남은 버퍼로 분리한다. CRLF/CR 구분자도 허용한다. */
+export function splitSSEFrames(buffer: string): { frames: string[]; rest: string } {
+  const normalized = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const parts = normalized.split('\n\n');
+  const rest = parts.pop() ?? '';
+  return { frames: parts, rest };
+}
+
+/** 하나의 SSE 프레임에서 data 라인만 추출해 이어붙인다. event 등 다른 필드는 무시한다. */
+export function getSSEDataPayload(frame: string): string | null {
+  const dataLines = frame
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim());
+
+  return dataLines.length > 0 ? dataLines.join('\n') : null;
+}
+
+/** Anthropic 스트리밍 이벤트에서 텍스트 델타를 추출한다. */
+export function extractAnthropicDeltaText(dataPayload: string): string {
+  try {
+    const data = JSON.parse(dataPayload) as {
+      type?: string;
+      delta?: { type?: string; text?: string };
+    };
+    if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta') {
+      return data.delta.text ?? '';
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+/** Gemini 스트리밍 청크에서 텍스트 델타를 추출한다. */
+export function extractGoogleDeltaText(dataPayload: string): string {
+  try {
+    const data = JSON.parse(dataPayload) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    const parts = data.candidates?.[0]?.content?.parts;
+    if (!Array.isArray(parts)) return '';
+    return parts.map((part) => part.text ?? '').join('');
+  } catch {
+    return '';
+  }
+}
+
+/** Gemini 스트리밍 청크가 MAX_TOKENS로 종료됐는지 확인한다. */
+export function isGoogleMaxTokensFinish(dataPayload: string): boolean {
+  try {
+    const data = JSON.parse(dataPayload) as {
+      candidates?: Array<{ finishReason?: string }>;
+    };
+    return data.candidates?.[0]?.finishReason === 'MAX_TOKENS';
+  } catch {
+    return false;
+  }
+}
+
+/** 클라이언트로 보낼 SSE data 프레임 문자열을 만든다. */
+export function formatSSEEvent(payload: object): string {
+  return `data: ${JSON.stringify(payload)}\n\n`;
+}
+
+/** Anthropic 스트림 중간에 전송되는 에러 이벤트에서 메시지를 추출한다. */
+export function extractAnthropicErrorMessage(dataPayload: string): string | null {
+  try {
+    const data = JSON.parse(dataPayload) as {
+      type?: string;
+      error?: { message?: string };
+    };
+    if (data.type !== 'error') return null;
+    return data.error?.message ?? 'Anthropic stream error';
+  } catch {
+    return null;
+  }
+}
+
+/** Gemini 스트림 중간에 전송되는 에러 청크에서 메시지를 추출한다. */
+export function extractGoogleErrorMessage(dataPayload: string): string | null {
+  try {
+    const data = JSON.parse(dataPayload) as {
+      error?: { message?: string };
+    };
+    if (!data.error) return null;
+    return data.error.message ?? 'Gemini stream error';
+  } catch {
+    return null;
+  }
+}

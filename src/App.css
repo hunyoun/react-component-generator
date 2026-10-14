@@ -116,8 +116,7 @@
 .composer-panel,
 .settings-panel,
 .component-card,
-.empty-state,
-.loading-card {
+.empty-state {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -464,39 +463,6 @@
   height: 68px;
 }
 
-.loading-card {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 20px;
-  margin-bottom: 18px;
-}
-
-.loading-pulse {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--primary);
-  animation: pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 0.45;
-    transform: scale(0.8);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.2);
-  }
-}
-
-.loading-card p {
-  color: var(--text-muted);
-  font-size: 0.95rem;
-}
-
 .results-grid {
   display: flex;
   flex-direction: column;
@@ -524,6 +490,17 @@
   display: block;
   color: var(--text-soft);
   font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.card-streaming-badge {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary) 15%, transparent);
+  color: var(--primary);
+  font-size: 0.72rem;
   font-weight: 650;
 }
 
